@@ -11,10 +11,12 @@ from django.core.cache import cache
 from django.conf import settings
 
 from nongratae.constants import BLOCKED_IPS_CACHE_TIMEOUT, BLOCKED_IPS_CACHE_KEY
-from nongratae.models import BlockedIP
+from nongratae.models import IPNonGrata, Visit
 
 SITE_ID = settings.SITE_ID
 BLOCKED_IPS_CACHE_KEY = BLOCKED_IPS_CACHE_KEY % SITE_ID
+
+FLUSH_VISITS = 3
 
 def get_blocked_ips():
     
@@ -22,8 +24,8 @@ def get_blocked_ips():
     if blocked_ips is None:
         blocked_ips = {}
 
-        for bi in  BlockedIP.objects.fitler(status=BlockedIP.BLOCKED,
-            site_id=SITE_ID):
+        for bi in  IPNonGrata.objects.filter(status=IPNonGrata.BLOCKED,
+            site__id=SITE_ID):
 
             blocked_ips[bi.ip] = bi.motive
 
@@ -32,7 +34,9 @@ def get_blocked_ips():
     return blocked_ips
     
 
-class IpNonGratae(object):
+class IpNonGrataeMiddleware(object):
+
+    ip_list = [] # It is a good thing this isn't thread safe
 
     def process_request(self, request):
         """
@@ -42,12 +46,23 @@ class IpNonGratae(object):
         malicious IPs
         """
 
-        ip = request.META['REMOTE_ADDR']
+        visit = Visit()
+        visit.build_from_request(request)
         blocked_ips = get_blocked_ips()
 
         # ip is blocked
-        if ip in blocked_ips:
+        if visit.ip in blocked_ips:
             return HttpResponse(blocked_ips[ip])
-
-
         
+        # Ip not blocked, then add it to the queue
+        self.ip_list.append(visit) 
+
+        # If reached flush limit, persist them for further analysis via a cron job
+        if len(self.ip_list) == FLUSH_VISITS:
+            print 'flushing...'
+            while self.ip_list:
+                visit = self.ip_list.pop()
+                visit.save()
+
+
+
